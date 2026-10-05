@@ -85,6 +85,54 @@ RSpec.describe 'Conversation Messages API', type: :request do
         expect(conversation.messages.last.content_type).to eq('text')
       end
 
+      it 'returns the provider timestamp for a Messages360 historical message' do
+        timestamp = '2024-04-05T12:34:56Z'
+        params = {
+          content: 'historical message',
+          source_id: 'm360-msg-provider-message-1',
+          external_created_at: timestamp,
+          content_attributes: {
+            messages360_import_only: true,
+            messages360_channel: 'ebay',
+            messages360_message_id: 'provider-message-1',
+            messages360_conversation_id: 'provider-conversation-1'
+          }
+        }
+
+        post api_v1_account_conversation_messages_url(account_id: account.id, conversation_id: conversation.display_id),
+             params: params,
+             headers: agent.create_new_auth_token,
+             as: :json
+
+        expect(response).to have_http_status(:success)
+        expect(response.parsed_body['created_at']).to eq(Time.rfc3339(timestamp).to_i)
+        expect(response.parsed_body.dig('content_attributes', 'external_created_at')).to eq(timestamp)
+      end
+
+      it 'rejects an invalid Messages360 provider timestamp without changing recency' do
+        original_activity = conversation.last_activity_at
+        params = {
+          content: 'historical message',
+          source_id: 'm360-msg-provider-message-1',
+          external_created_at: 'invalid',
+          content_attributes: {
+            messages360_import_only: true,
+            messages360_channel: 'ebay',
+            messages360_message_id: 'provider-message-1',
+            messages360_conversation_id: 'provider-conversation-1'
+          }
+        }
+
+        post api_v1_account_conversation_messages_url(account_id: account.id, conversation_id: conversation.display_id),
+             params: params,
+             headers: agent.create_new_auth_token,
+             as: :json
+
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(conversation.messages).to be_empty
+        expect(conversation.reload.last_activity_at).to eq(original_activity)
+      end
+
       it 'creates a new outgoing message with attachment' do
         file = fixture_file_upload(Rails.root.join('spec/assets/avatar.png'), 'image/png')
         params = { content: 'test-message', attachments: [file] }

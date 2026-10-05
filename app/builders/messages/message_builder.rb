@@ -118,7 +118,32 @@ class Messages::MessageBuilder
   end
 
   def external_created_at
+    return messages360_historical_created_at if messages360_historical_import?
+
     @params[:external_created_at].present? ? { external_created_at: @params[:external_created_at] } : {}
+  end
+
+  def messages360_historical_import?
+    attributes = content_attributes.with_indifferent_access
+
+    attributes[:messages360_import_only] == true &&
+      @params[:source_id].to_s.start_with?('m360-msg-') &&
+      attributes[:messages360_channel] == 'ebay' &&
+      attributes[:messages360_message_id].present? &&
+      attributes[:messages360_conversation_id].present?
+  end
+
+  def messages360_historical_created_at
+    timestamp = @params[:external_created_at]
+    raise ArgumentError, 'external_created_at is required for Messages360 historical imports' unless timestamp.is_a?(String) && timestamp.present?
+
+    created_at = Time.rfc3339(timestamp).in_time_zone
+    attributes = content_attributes
+    attributes['external_created_at'] = timestamp
+
+    { created_at: created_at, content_attributes: attributes.presence }
+  rescue ArgumentError
+    raise ArgumentError, 'external_created_at must be a valid RFC3339 timestamp for Messages360 historical imports'
   end
 
   def automation_rule_id

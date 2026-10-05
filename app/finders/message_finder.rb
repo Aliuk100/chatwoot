@@ -37,6 +37,8 @@ class MessageFinder
   end
 
   def messages_after(after_id)
+    return messages_after_chronologically(after_id) if messages360_historical_conversation?
+
     messages.reorder('created_at asc').where('id > ?', after_id).limit(100)
   end
 
@@ -44,17 +46,63 @@ class MessageFinder
     return messages_latest if oversized_message_id?(before_id)
 
     before_id = normalized_message_id(before_id)
+    return messages_before_chronologically(before_id) if messages360_historical_conversation?
+
     messages.reorder('created_at desc').where('id < ?', before_id).limit(20).reverse
   end
 
   def messages_between(after_id, before_id)
+    return messages_between_chronologically(after_id, before_id) if messages360_historical_conversation?
+
     message_scope = messages.reorder('created_at asc').where('id >= ?', after_id)
     message_scope = message_scope.where('id < ?', normalized_message_id(before_id)) unless oversized_message_id?(before_id)
     message_scope.limit(1000)
   end
 
   def messages_latest
-    messages.reorder('created_at desc').limit(20).reverse
+    order = messages360_historical_conversation? ? { created_at: :desc, id: :desc } : { created_at: :desc }
+    messages.reorder(order).limit(20).reverse
+  end
+
+  def messages_after_chronologically(after_id)
+    cursor = @conversation.messages.find_by(id: after_id)
+    return messages.reorder('created_at asc').where('id > ?', after_id).limit(100) unless cursor
+
+    messages.reorder(created_at: :asc, id: :asc)
+            .where('messages.created_at > :created_at OR (messages.created_at = :created_at AND messages.id > :id)',
+                   created_at: cursor.created_at, id: cursor.id)
+            .limit(100)
+  end
+
+  def messages_before_chronologically(before_id)
+    cursor = @conversation.messages.find_by(id: before_id)
+    return messages.reorder('created_at desc').where('id < ?', before_id).limit(20).reverse unless cursor
+
+    messages.reorder(created_at: :desc, id: :desc)
+            .where('messages.created_at < :created_at OR (messages.created_at = :created_at AND messages.id < :id)',
+                   created_at: cursor.created_at, id: cursor.id)
+            .limit(20)
+            .reverse
+  end
+
+  def messages_between_chronologically(after_id, before_id)
+    after_cursor = @conversation.messages.find_by(id: after_id)
+    before_cursor = @conversation.messages.find_by(id: before_id) unless oversized_message_id?(before_id)
+    return messages.none unless after_cursor
+    return messages.none unless oversized_message_id?(before_id) || before_cursor
+
+    message_scope = messages.reorder(created_at: :asc, id: :asc)
+                            .where('messages.created_at > :created_at OR (messages.created_at = :created_at AND messages.id >= :id)',
+                                   created_at: after_cursor.created_at, id: after_cursor.id)
+    if before_cursor
+      message_scope = message_scope.where('messages.created_at < :created_at OR (messages.created_at = :created_at AND messages.id < :id)',
+                                          created_at: before_cursor.created_at, id: before_cursor.id)
+    end
+    message_scope.limit(1000)
+  end
+
+  def messages360_historical_conversation?
+    @conversation.messages.messages360_historical.exists?
   end
 
   def normalized_message_id(value)

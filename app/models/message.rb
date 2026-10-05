@@ -126,6 +126,14 @@ class Message < ApplicationRecord
   # if you want to change order, use `reorder`
   default_scope { order(created_at: :asc) }
 
+  scope :messages360_historical, lambda {
+    where("source_id LIKE 'm360-msg-%'")
+      .where("(messages.content_attributes #>> '{}')::jsonb @> ?::jsonb",
+             { messages360_import_only: true, messages360_channel: 'ebay' }.to_json)
+      .where("COALESCE((messages.content_attributes #>> '{}')::jsonb ->> 'messages360_message_id', '') <> ''")
+      .where("COALESCE((messages.content_attributes #>> '{}')::jsonb ->> 'messages360_conversation_id', '') <> ''")
+  }
+
   belongs_to :account
   belongs_to :inbox
   belongs_to :conversation
@@ -324,6 +332,11 @@ class Message < ApplicationRecord
 
   def execute_after_create_commit_callbacks
     # rails issue with order of active record callbacks being executed https://github.com/rails/rails/issues/20911
+    if messages360_historical_import?
+      set_conversation_activity
+      return
+    end
+
     reopen_conversation
     mark_pending_conversation_as_open_for_human_response
     set_conversation_activity
@@ -447,9 +460,24 @@ class Message < ApplicationRecord
   end
 
   def set_conversation_activity
-    # rubocop:disable Rails/SkipsModelValidations
-    conversation.update_columns(last_activity_at: created_at, updated_at: Time.current)
-    # rubocop:enable Rails/SkipsModelValidations
+    # Serialize historical and live callbacks on the same row before reading MAX.
+    # The lock's following query sees messages committed while this callback waited.
+    Conversation.find(conversation_id).with_lock do
+      historical_context = messages360_historical_import? || conversation.messages.messages360_historical.exists?
+      activity_at = historical_context ? conversation.messages.maximum(:created_at) : created_at
+
+      # rubocop:disable Rails/SkipsModelValidations
+      conversation.update_columns(last_activity_at: activity_at, updated_at: Time.current)
+      # rubocop:enable Rails/SkipsModelValidations
+    end
+  end
+
+  def messages360_historical_import?
+    content_attributes['messages360_import_only'] == true &&
+      source_id.to_s.start_with?('m360-msg-') &&
+      content_attributes['messages360_channel'] == 'ebay' &&
+      content_attributes['messages360_message_id'].present? &&
+      content_attributes['messages360_conversation_id'].present?
   end
 
   def reindex_for_search
